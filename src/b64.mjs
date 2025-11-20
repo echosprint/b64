@@ -25,6 +25,7 @@ const VERSION = 0x01;
 
 // Cipher types
 const CIPHER_CHACHA20_POLY1305 = 0x01;
+const CIPHER_ALGORITHM = 'chacha20-poly1305';
 
 const MAX_EXTENSION_LENGTH = 16;
 const CHUNK_SIZE = 3 * 64 * 1024; // 192KB - aligned for base64 (divisible by 3)
@@ -208,7 +209,7 @@ class EncryptTransform extends Transform {
         const key = deriveKey(password, salt);
 
         // Create cipher (ChaCha20-Poly1305 requires 12-byte nonce, we use first 12 bytes)
-        this.cipher = createCipheriv('chacha20-poly1305', key, nonce.subarray(0, 12), {
+        this.cipher = createCipheriv(CIPHER_ALGORITHM, key, nonce.subarray(0, 12), {
             authTagLength: 16
         });
 
@@ -257,7 +258,7 @@ class DecryptTransform extends Transform {
         const key = deriveKey(password, salt);
 
         // Create decipher (ChaCha20-Poly1305 requires 12-byte nonce)
-        this.decipher = createDecipheriv('chacha20-poly1305', key, nonce.subarray(0, 12), {
+        this.decipher = createDecipheriv(CIPHER_ALGORITHM, key, nonce.subarray(0, 12), {
             authTagLength: 16
         });
 
@@ -468,7 +469,7 @@ class HeaderAndDecryptTransform extends Transform {
 
                     // Derive key and create decipher
                     const key = deriveKey(this.password, this.header.salt);
-                    this.decipher = createDecipheriv('chacha20-poly1305', key, this.header.nonce.subarray(0, 12), {
+                    this.decipher = createDecipheriv(CIPHER_ALGORITHM, key, this.header.nonce.subarray(0, 12), {
                         authTagLength: 16
                     });
                     this.decipher.setAAD(aad, { plaintextLength: 0 });
