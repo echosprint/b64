@@ -462,7 +462,7 @@ class HeaderAndDecryptTransform extends Transform {
                     // Parse header
                     this.header = Header.parse(this.buffer.subarray(0, HEADER_SIZE));
 
-                    console.log('Decrypting with ChaCha20-Poly1305...');
+                    // console.log('Decrypting with ChaCha20-Poly1305...');
 
                     // Get AAD from header (all fields except authTag)
                     const aad = this.header.getAAD();
@@ -516,7 +516,7 @@ class HeaderAndDecryptTransform extends Transform {
                 if (final.length > 0) {
                     this.push(final);
                 }
-                console.log('Authentication verification: PASSED');
+                // console.log('Authentication verification: PASSED');
                 callback();
             } catch (err) {
                 console.error('Authentication verification: FAILED');
@@ -564,7 +564,7 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
     const nonce = randomBytes(16); // We'll use first 12 bytes for ChaCha20-Poly1305
     const salt = randomBytes(16);
 
-    console.log('Encrypting with ChaCha20-Poly1305...');
+    // console.log('Encrypting with ChaCha20-Poly1305...');
 
     const outputPath = inputFilePath.replace(extension, '') + '.b64.txt';
 
@@ -602,11 +602,11 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         const written = writeSync(fd, encodedHeader, 0, 'utf8');
         closeSync(fd);
 
-        console.log(`Updated authTag in header (${written} bytes written)`);
+        // console.log(`Updated authTag in header (${written} bytes written)`);
 
         console.log(`Encoded: ${inputFilePath} -> ${outputPath}`);
-        console.log(`  Size: ${fileSize} bytes`);
-        console.log(`  Cipher: ChaCha20-Poly1305`);
+        // console.log(`  Size: ${fileSize} bytes`);
+        // console.log(`  Cipher: ChaCha20-Poly1305`);
     } catch (err) {
         console.error(`Error during encoding: ${err.message}`);
         process.exit(1);
@@ -659,8 +659,8 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         }
 
         console.log(`Decoded: ${inputFilePath} -> ${outputPath}`);
-        console.log(`  Size: ${header.fileSize} bytes`);
-        console.log(`  Cipher: ChaCha20-Poly1305`);
+        // console.log(`  Size: ${header.fileSize} bytes`);
+        // console.log(`  Cipher: ChaCha20-Poly1305`);
     } catch (err) {
         console.error(`Error during decoding: ${err.message}`);
 
