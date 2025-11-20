@@ -12,7 +12,7 @@
  *   Decode: node b64.mjs -d <file.b64.txt>
  */
 
-import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync } from 'fs';
+import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync } from 'fs';
 import { parse as parsePath } from 'path';
 import { Transform, Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -37,6 +37,31 @@ const deriveKey = (password, salt) => pbkdf2Sync(password, salt, 100000, 32, 'sh
 
 /**
  * Header class for encoding/decoding 96-byte file headers
+ *
+ * Header Layout (96 bytes total):
+ * ┌──────────────────────────────────────────────────────────────────────┐
+ * │ Offset │ Size │ Field         │ Description                          │
+ * ├──────────────────────────────────────────────────────────────────────┤
+ * │   0-1  │  2   │ Magic Number  │ 0xB6, 0x4F (file format identifier)  │
+ * │   2    │  1   │ Version       │ 0x01 (format version)                │
+ * │   3    │  1   │ Flags         │ Reserved for future flags            │
+ * │   4    │  1   │ Cipher Type   │ 0x01 = ChaCha20-Poly1305             │
+ * │   5-7  │  3   │ Reserved      │ Reserved for future use              │
+ * ├──────────────────────────────────────────────────────────────────────┤
+ * │   8    │  1   │ Ext Length    │ Length of file extension (≤16)       │
+ * │  9-16  │  8   │ File Size     │ Original file size (uint64 BE)       │
+ * │ 17-32  │ 16   │ Extension     │ File extension (UTF-8, null padded)  │
+ * ├──────────────────────────────────────────────────────────────────────┤
+ * │ 33-48  │ 16   │ Nonce         │ Random nonce (12 bytes used)         │
+ * │ 49-64  │ 16   │ Salt          │ PBKDF2 salt for key derivation       │
+ * │ 65-80  │ 16   │ Auth Tag      │ ChaCha20-Poly1305 authentication tag │
+ * │ 81-95  │ 15   │ Reserved      │ Reserved for future use              │
+ * └──────────────────────────────────────────────────────────────────────┘
+ *
+ * AAD (Additional Authenticated Data):
+ *   - Bytes 0-64 (all fields before authTag) + Bytes 81-95 (reserved after authTag)
+ *   - Total 80 bytes authenticated but not encrypted
+ *   - Protects header metadata from tampering
  */
 class Header {
     constructor(extension, fileSize, nonce, salt, authTag) {
@@ -76,7 +101,7 @@ class Header {
         this.salt?.copy(buf, pos, 0, 16); pos += 16;
         this.authTag?.copy(buf, pos, 0, 16); pos += 16;
 
-        // Reserved (16 bytes) - already zeroed by alloc
+        // Reserved (15 bytes, pos=81-95) - already zeroed by alloc
         return buf;
     }
 
@@ -121,6 +146,26 @@ class Header {
         const header = new Header(extension, fileSize, nonce, salt, authTag);
         header.cipherType = cipherType;
         return header;
+    }
+
+    /**
+     * Get Additional Authenticated Data (AAD) for AEAD encryption
+     *
+     * AAD includes all header fields except the authTag itself:
+     *   - Bytes 0-64: Everything before authTag (metadata, nonce, salt)
+     *   - Bytes 81-95: Reserved section after authTag
+     *
+     * Total: 80 bytes authenticated but not encrypted
+     * This protects header metadata from tampering
+     *
+     * @returns {Buffer} 80-byte AAD buffer
+     */
+    getAAD() {
+        const headerBuffer = this.toBuffer();
+        const aad = Buffer.alloc(80);
+        headerBuffer.copy(aad, 0, 0, 65);   // First 65 bytes (everything before authTag at pos 65)
+        headerBuffer.copy(aad, 65, 81, 96); // Last 15 bytes (reserved section after authTag)
+        return aad;
     }
 }
 
@@ -392,6 +437,100 @@ class HeaderSkipTransform extends Transform {
     getHeader = () => this.header;
 }
 
+/**
+ * Combined transform stream for header extraction + decryption
+ * Extracts header, then decrypts all subsequent data in streaming mode
+ */
+class HeaderAndDecryptTransform extends Transform {
+    constructor(password, options) {
+        super(options);
+        this.password = password;
+        this.headerProcessed = false;
+        this.header = null;
+        this.decipher = null;
+        this.buffer = Buffer.alloc(0);
+    }
+
+    _transform = (chunk, _encoding, callback) => {
+        if (!this.headerProcessed) {
+            // Accumulate until we have the full header
+            this.buffer = Buffer.concat([this.buffer, chunk]);
+
+            if (this.buffer.length >= HEADER_SIZE) {
+                try {
+                    // Parse header
+                    this.header = Header.parse(this.buffer.subarray(0, HEADER_SIZE));
+
+                    console.log('Decrypting with ChaCha20-Poly1305...');
+
+                    // Get AAD from header (all fields except authTag)
+                    const aad = this.header.getAAD();
+
+                    // Derive key and create decipher
+                    const key = deriveKey(this.password, this.header.salt);
+                    this.decipher = createDecipheriv('chacha20-poly1305', key, this.header.nonce.subarray(0, 12), {
+                        authTagLength: 16
+                    });
+                    this.decipher.setAAD(aad, { plaintextLength: 0 });
+                    this.decipher.setAuthTag(this.header.authTag);
+
+                    // Process encrypted content after header
+                    const encryptedContent = this.buffer.subarray(HEADER_SIZE);
+                    this.headerProcessed = true;
+                    this.buffer = null; // Free memory
+
+                    if (encryptedContent.length > 0) {
+                        const decrypted = this.decipher.update(encryptedContent);
+                        if (decrypted.length > 0) {
+                            this.push(decrypted);
+                        }
+                    }
+
+                    callback();
+                    return;
+                } catch (err) {
+                    callback(err);
+                    return;
+                }
+            }
+            callback();
+        } else {
+            // Decrypt streaming data
+            try {
+                const decrypted = this.decipher.update(chunk);
+                if (decrypted.length > 0) {
+                    this.push(decrypted);
+                }
+                callback();
+            } catch (err) {
+                callback(err);
+            }
+        }
+    };
+
+    _flush = (callback) => {
+        if (this.decipher) {
+            try {
+                const final = this.decipher.final();
+                if (final.length > 0) {
+                    this.push(final);
+                }
+                console.log('Authentication verification: PASSED');
+                callback();
+            } catch (err) {
+                console.error('Authentication verification: FAILED');
+                console.error('File may be corrupted or tampered with.');
+                callback(err);
+            }
+        } else {
+            callback();
+        }
+    };
+
+    getHeader = () => this.header;
+    getExtension = () => this.header?.extension;
+}
+
 
 /**
  * Encode a file to base64 with ChaCha20-Poly1305 encryption
@@ -432,10 +571,8 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
     const placeholderHeader = new Header(extension, fileSize, nonce, salt, Buffer.alloc(16));
     const headerBuffer = placeholderHeader.toBuffer();
 
-    // Header without authTag (first 64 bytes + last 16 bytes) to use as AAD
-    const aad = Buffer.alloc(80);
-    headerBuffer.copy(aad, 0, 0, 64);   // First 64 bytes (everything before authTag)
-    headerBuffer.copy(aad, 64, 80, 96); // Last 16 bytes (reserved section after authTag)
+    // Get AAD from header (all fields except authTag)
+    const aad = placeholderHeader.getAAD();
 
     const encryptStream = new EncryptTransform(password, nonce, salt, aad);
 
@@ -452,26 +589,19 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         // Get authTag after encryption completes
         const authTag = encryptStream.getAuthTag();
 
-        // Update authTag in the base64 file
-        // AuthTag is at bytes 64-79 in header (16 bytes)
-        // Base64 encodes in groups of 3 bytes → 4 chars
-        // Bytes 63-80 (18 bytes) → chars 84-107 (24 chars)
+        // Update authTag in the header buffer
+        // AuthTag is at bytes 65-80 in header (16 bytes)
+        authTag.copy(headerBuffer, 65, 0, 16);
 
-        // Create the 18-byte chunk with real authTag
-        const updatedChunk = Buffer.alloc(18);
-        headerBuffer.copy(updatedChunk, 0, 63, 64);  // byte 63 (from placeholder header)
-        authTag.copy(updatedChunk, 1, 0, 16);         // bytes 64-79 (real authTag)
-        headerBuffer.copy(updatedChunk, 17, 80, 81); // byte 80 (from placeholder header)
+        // Base64 encode the entire updated header (96 bytes → 128 base64 chars)
+        const encodedHeader = headerBuffer.toString('base64');
 
-        // Base64 encode this chunk
-        const encodedChunk = updatedChunk.toString('base64');
-
-        // Replace at position 84 in the output file
+        // Replace the header in the output file from position 0
         const fd = openSync(outputPath, 'r+');
-        const written = writeSync(fd, encodedChunk, 84, 'utf8');
+        const written = writeSync(fd, encodedHeader, 0, 'utf8');
         closeSync(fd);
 
-        console.log(`Updated authTag at position 84 (${written} bytes written)`);
+        console.log(`Updated authTag in header (${written} bytes written)`);
 
         console.log(`Encoded: ${inputFilePath} -> ${outputPath}`);
         console.log(`  Size: ${fileSize} bytes`);
@@ -485,13 +615,13 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
 /**
  * Decode a .b64.txt file back to its original format
  *
- * Process flow:
+ * Process flow (single streaming pipeline):
  *   1. Read .b64.txt file in 192KB chunks (streaming)
  *   2. Base64 decode
  *   3. Extract and validate 96-byte header
  *   4. Decrypt with ChaCha20-Poly1305 using header info
- *   5. Verify authentication tag
- *   6. Write to original filename with correct extension
+ *   5. Write to original filename with correct extension
+ *   6. Verify authentication tag at end (delete output if tampered)
  *
  * @param {string} inputFilePath - Path to .b64.txt file to decode
  * @param {string} password - Decryption password (uses default if not provided)
@@ -502,52 +632,53 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         throw new Error('Only can decode file end with .b64.txt file');
     }
 
-    // Decode and extract header
-    const headerSkipStream = new HeaderSkipTransform();
-    const encryptedChunks = [];
+    // Create combined header extraction + decryption stream
+    const headerAndDecryptStream = new HeaderAndDecryptTransform(password);
 
-    headerSkipStream.on('data', (chunk) => encryptedChunks.push(chunk));
-
-    await pipeline(
-        createReadStream(inputFilePath, { encoding: 'utf8', highWaterMark: CHUNK_SIZE }),
-        new Base64DecodeTransform(),
-        headerSkipStream
-    );
-
-    const header = headerSkipStream.getHeader();
-
-    if (!header) {
-        throw new Error('Failed to extract header');
-    }
-
-    console.log('Decrypting with ChaCha20-Poly1305...');
-
-    // Create AAD from header (without authTag)
-    const headerBuffer = header.toBuffer();
-    const aad = Buffer.alloc(80);
-    headerBuffer.copy(aad, 0, 0, 64);   // First 64 bytes (everything before authTag)
-    headerBuffer.copy(aad, 64, 80, 96); // Last 16 bytes (reserved section after authTag)
-
-    // Create decrypt stream with header info and AAD
-    const encryptedData = Buffer.concat(encryptedChunks);
-    const decryptStream = new DecryptTransform(password, header.nonce, header.salt, header.authTag, aad);
-
-    // Decrypt and write to file
-    const outputPath = inputFilePath.replace('.b64.txt', '') + header.extension;
-    const outputStream = createWriteStream(outputPath);
+    // Determine output path (will use header extension after parsing)
+    let outputPath = inputFilePath.replace('.b64.txt', '');
 
     try {
+        // Single streaming pipeline: read → base64 decode → header+decrypt → output
         await pipeline(
-            Readable.from([encryptedData]),
-            decryptStream,
-            outputStream
+            createReadStream(inputFilePath, { encoding: 'utf8', highWaterMark: CHUNK_SIZE }),
+            new Base64DecodeTransform(),
+            headerAndDecryptStream,
+            createWriteStream(outputPath)
         );
+
+        // Get final output path with extension
+        const header = headerAndDecryptStream.getHeader();
+        const finalPath = outputPath + header.extension;
+
+        // Rename file to include proper extension
+        if (header.extension) {
+            renameSync(outputPath, finalPath);
+            outputPath = finalPath;
+        }
 
         console.log(`Decoded: ${inputFilePath} -> ${outputPath}`);
         console.log(`  Size: ${header.fileSize} bytes`);
         console.log(`  Cipher: ChaCha20-Poly1305`);
     } catch (err) {
         console.error(`Error during decoding: ${err.message}`);
+
+        // Delete output file if authentication failed (tampered file)
+        try {
+            const header = headerAndDecryptStream.getHeader();
+            const finalPath = header?.extension ? outputPath + header.extension : outputPath;
+
+            if (existsSync(outputPath)) {
+                unlinkSync(outputPath);
+                console.error(`Deleted corrupted output file: ${outputPath}`);
+            } else if (header?.extension && existsSync(finalPath)) {
+                unlinkSync(finalPath);
+                console.error(`Deleted corrupted output file: ${finalPath}`);
+            }
+        } catch (unlinkErr) {
+            // Ignore cleanup errors
+        }
+
         process.exit(1);
     }
 };
