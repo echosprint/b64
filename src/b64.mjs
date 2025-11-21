@@ -31,6 +31,7 @@ const CIPHER_ALGORITHM = 'chacha20-poly1305';
 
 const MAX_EXTENSION_LENGTH = 16;
 const CHUNK_SIZE = 3 * 64 * 1024; // 192KB - aligned for base64 (divisible by 3)
+const MIN_SPLIT_SIZE = 1024; // 1KB minimum split size (header is 128 base64 chars)
 const DEFAULT_PASSWORD = 'xK9$mP2vL#nQ8wR@jF5yT!hB7dC*sE4uA6zN&gH3iV%oW1eX0pU-qM+kJ/lY~rI|fD=tG?bZ^cS>aL<vN)wQ(hE}jK{mP]nR[oT';
 
 /**
@@ -339,6 +340,9 @@ const parseArgs = () => {
             if (i + 1 < args.length) {
                 try {
                     maxSize = parseSize(args[i + 1]);
+                    if (maxSize < MIN_SPLIT_SIZE) {
+                        printUsage(`--size must be at least ${MIN_SPLIT_SIZE} bytes (1KB)`);
+                    }
                     i++; // Skip next argument since we consumed it
                 } catch (err) {
                     printUsage(err.message);

@@ -32,6 +32,7 @@ const VERSION: u8 = 0x01;
 const CIPHER_CHACHA20_POLY1305: u8 = 0x01;
 
 const MAX_EXTENSION_LENGTH: usize = 16;
+const MIN_SPLIT_SIZE: usize = 1024; // 1KB minimum split size (header is 128 base64 chars)
 const DEFAULT_PASSWORD: &str = "xK9$mP2vL#nQ8wR@jF5yT!hB7dC*sE4uA6zN&gH3iV%oW1eX0pU-qM+kJ/lY~rI|fD=tG?bZ^cS>aL<vN)wQ(hE}jK{mP]nR[oT";
 
 // PBKDF2 iterations (matching JS version)
@@ -138,9 +139,15 @@ fn parse_size(s: &str) -> Result<usize, String> {
         (s.as_str(), 1)
     };
 
-    num_str.trim().parse::<f64>()
+    let size = num_str.trim().parse::<f64>()
         .map(|n| (n * unit as f64) as usize)
-        .map_err(|_| format!("Invalid size format: {}. Use format like '5mb', '500kb', '1gb'", s))
+        .map_err(|_| format!("Invalid size format: {}. Use format like '5mb', '500kb', '1gb'", s))?;
+
+    if size < MIN_SPLIT_SIZE {
+        return Err(format!("--size must be at least {} bytes (1KB)", MIN_SPLIT_SIZE));
+    }
+
+    Ok(size)
 }
 
 /// Header field offsets for 96-byte binary layout
