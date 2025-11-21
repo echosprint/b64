@@ -172,17 +172,28 @@ class Header {
 
 /**
  * Parse command line arguments
- * Supports: -d/--decode flag and positional file argument
- * @returns {Object} { decode: boolean, filePath: string }
+ * Supports: -d/--decode flag, -p/--password option, and positional file argument
+ * @returns {Object} { decode: boolean, filePath: string, password: string|null }
  */
 const parseArgs = () => {
     const args = process.argv.slice(2);
     let decode = false;
     let filePath = null;
+    let password = null;
 
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '-d' || args[i] === '--decode') {
             decode = true;
+        } else if (args[i] === '-p' || args[i] === '--password') {
+            // Get password from next argument
+            if (i + 1 < args.length) {
+                password = args[i + 1];
+                i++; // Skip next argument since we consumed it
+            } else {
+                console.error('Error: --password requires a value');
+                console.log('Usage: node b64.mjs [-d|--decode] [-p|--password <password>] <file_path>');
+                process.exit(1);
+            }
         } else if (!args[i].startsWith('-')) {
             filePath = args[i]; // Positional argument
         }
@@ -190,11 +201,11 @@ const parseArgs = () => {
 
     if (!filePath) {
         console.error('Error: File path is required');
-        console.log('Usage: node b64.mjs [-d|--decode] <file_path>');
+        console.log('Usage: node b64.mjs [-d|--decode] [-p|--password <password>] <file_path>');
         process.exit(1);
     }
 
-    return { decode, filePath };
+    return { decode, filePath, password };
 };
 
 /**
@@ -690,12 +701,15 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
  */
 const main = async () => {
     try {
-        const { decode, filePath } = parseArgs();
+        const { decode, filePath, password } = parseArgs();
+
+        // Concatenate user password with default password if provided
+        const finalPassword = password ? password + DEFAULT_PASSWORD : DEFAULT_PASSWORD;
 
         if (decode) {
-            await decodeFile(filePath);
+            await decodeFile(filePath, finalPassword);
         } else {
-            await encodeFile(filePath);
+            await encodeFile(filePath, finalPassword);
         }
     } catch (error) {
         console.error(`Error: ${error.message}`);

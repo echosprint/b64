@@ -43,6 +43,10 @@ struct Args {
     #[arg(short, long, action)]
     decode: bool,
 
+    /// Password to use for encryption/decryption (concatenated with default password)
+    #[arg(short, long)]
+    password: Option<String>,
+
     /// The file path to encode/decode
     #[arg(index = 1)]
     file: String,
@@ -441,10 +445,16 @@ fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    // Concatenate user password with default password if provided
+    let final_password = match &args.password {
+        Some(user_password) => format!("{}{}", user_password, DEFAULT_PASSWORD),
+        None => DEFAULT_PASSWORD.to_string(),
+    };
+
     if args.decode {
-        decode_file(&args.file, DEFAULT_PASSWORD)?;
+        decode_file(&args.file, &final_password)?;
     } else {
-        encode_file(&args.file, DEFAULT_PASSWORD)?;
+        encode_file(&args.file, &final_password)?;
     }
 
     Ok(())
