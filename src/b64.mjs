@@ -5,16 +5,18 @@
  *
  * Encodes files to base64 with authenticated encryption and file extension preservation.
  * Uses streaming to handle large files (5GB+) without loading into memory.
- * Features: ChaCha20-Poly1305 AEAD, PBKDF2 key derivation, tamper detection
+ * Features: ChaCha20-Poly1305 AEAD, PBKDF2 key derivation, tamper detection, file splitting
  *
  * Usage:
- *   Encode: node b64.mjs <file>
- *   Decode: node b64.mjs -d <file.b64.txt>
+ *   Encode: node b64.mjs [-p <password>] [-s <size>] <file>
+ *   Decode: node b64.mjs -d [-p <password>] <file.b64.txt>
+ *
+ * Split files (e.g., file_0301.b64.txt) are auto-detected and combined when decoding.
  */
 
-import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync } from 'fs';
-import { parse as parsePath } from 'path';
-import { Transform, Readable } from 'stream';
+import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync, readdirSync } from 'fs';
+import { parse as parsePath, dirname, basename } from 'path';
+import { Transform, Readable, PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
 import { randomBytes, pbkdf2Sync, createCipheriv, createDecipheriv } from 'crypto';
 
@@ -30,6 +32,125 @@ const CIPHER_ALGORITHM = 'chacha20-poly1305';
 const MAX_EXTENSION_LENGTH = 16;
 const CHUNK_SIZE = 3 * 64 * 1024; // 192KB - aligned for base64 (divisible by 3)
 const DEFAULT_PASSWORD = 'xK9$mP2vL#nQ8wR@jF5yT!hB7dC*sE4uA6zN&gH3iV%oW1eX0pU-qM+kJ/lY~rI|fD=tG?bZ^cS>aL<vN)wQ(hE}jK{mP]nR[oT';
+
+/**
+ * Parse size string to bytes (e.g., "5mb", "500kb", "1gb")
+ * Case insensitive, supports: b, kb, mb, gb
+ * @param {string} sizeStr - Size string like "5mb" or "500KB"
+ * @returns {number} Size in bytes
+ */
+const parseSize = (sizeStr) => {
+    const match = sizeStr.toLowerCase().match(/^(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)?$/);
+    if (!match) {
+        throw new Error(`Invalid size format: ${sizeStr}. Use format like "5mb", "500kb", "1gb"`);
+    }
+    const value = parseFloat(match[1]);
+    const unit = match[2] || 'b';
+    const multipliers = { b: 1, kb: 1024, mb: 1024 * 1024, gb: 1024 * 1024 * 1024 };
+    return Math.floor(value * multipliers[unit]);
+};
+
+/**
+ * Parse split file name pattern: baseName_XXYY.b64.txt
+ * where XX = total files, YY = file index (01-99)
+ * @param {string} filePath - Path to check
+ * @returns {Object|null} { basePath, totalFiles, fileIndex } or null if not a split file
+ */
+const parseSplitFileName = (filePath) => {
+    const match = filePath.match(/^(.+)_(\d{2})(\d{2})\.b64\.txt$/);
+    if (!match) return null;
+
+    const [, basePath, totalStr, indexStr] = match;
+    const totalFiles = parseInt(totalStr, 10);
+    const fileIndex = parseInt(indexStr, 10);
+
+    // Validate: index should be between 1 and total
+    if (fileIndex < 1 || fileIndex > totalFiles || totalFiles > 99) {
+        return null;
+    }
+
+    return { basePath, totalFiles, fileIndex };
+};
+
+/**
+ * Get all split file paths for a given split file
+ * @param {string} filePath - Path to any file in the split set
+ * @returns {string[]|null} Array of all split file paths in order, or null if not a split file
+ */
+const getSplitFilePaths = (filePath) => {
+    const parsed = parseSplitFileName(filePath);
+    if (!parsed) return null;
+
+    const { basePath, totalFiles } = parsed;
+    const paths = [];
+
+    for (let i = 1; i <= totalFiles; i++) {
+        const partPath = `${basePath}_${String(totalFiles).padStart(2, '0')}${String(i).padStart(2, '0')}.b64.txt`;
+        if (!existsSync(partPath)) {
+            throw new Error(`Missing split file part: ${partPath}`);
+        }
+        paths.push(partPath);
+    }
+
+    return paths;
+};
+
+/**
+ * Readable stream that combines multiple files into a single stream
+ * Reads files sequentially and outputs their combined content
+ */
+class CombineSplitFilesReadable extends Readable {
+    constructor(filePaths, options = {}) {
+        super(options);
+        this.filePaths = filePaths;
+        this.currentIndex = 0;
+        this.currentStream = null;
+    }
+
+    _read() {
+        // If we have a current stream, let it push data
+        if (this.currentStream) return;
+
+        // If no more files, signal end
+        if (this.currentIndex >= this.filePaths.length) {
+            this.push(null);
+            return;
+        }
+
+        // Open next file
+        const filePath = this.filePaths[this.currentIndex];
+        this.currentStream = createReadStream(filePath, { encoding: 'utf8', highWaterMark: CHUNK_SIZE });
+
+        this.currentStream.on('data', (chunk) => {
+            // Pause the file stream if buffer is full
+            if (!this.push(chunk)) {
+                this.currentStream.pause();
+            }
+        });
+
+        this.currentStream.on('end', () => {
+            this.currentStream = null;
+            this.currentIndex++;
+            // Continue reading from next file
+            this._read();
+        });
+
+        this.currentStream.on('error', (err) => {
+            this.destroy(err);
+        });
+
+        // Resume if we were paused
+        this.currentStream.resume();
+    }
+
+    _destroy(err, callback) {
+        if (this.currentStream) {
+            this.currentStream.destroy();
+            this.currentStream = null;
+        }
+        callback(err);
+    }
+}
 
 /**
  * Derive encryption key from password using PBKDF2
@@ -171,15 +292,36 @@ class Header {
 }
 
 /**
+ * Print usage information and exit
+ * @param {string|null} error - Error message to display (null for help)
+ */
+const printUsage = (error = null) => {
+    if (error) {
+        console.error(`Error: ${error}`);
+    }
+    console.log('Usage:');
+    console.log('  Encode: node b64.mjs [-p|--password <password>] [-s|--size <size>] <file_path>');
+    console.log('  Decode: node b64.mjs -d [-p|--password <password>] <file_path>');
+    console.log('Options:');
+    console.log('  -d, --decode              Decode a .b64.txt file');
+    console.log('  -p, --password <password> Custom password (or set B64_ECRY_PASSWORD env var)');
+    console.log('  -s, --size <size>         Max output file size, e.g., 5mb, 500kb (encode only)');
+    console.log('Note:');
+    console.log('  Split files (e.g., file_0301.b64.txt) are auto-detected when decoding.');
+    process.exit(error ? 1 : 0);
+};
+
+/**
  * Parse command line arguments
- * Supports: -d/--decode flag, -p/--password option, and positional file argument
- * @returns {Object} { decode: boolean, filePath: string, password: string|null }
+ * Supports: -d/--decode flag, -p/--password option, -s/--size option, and positional file argument
+ * @returns {Object} { decode: boolean, filePath: string, password: string|null, maxSize: number|null }
  */
 const parseArgs = () => {
     const args = process.argv.slice(2);
     let decode = false;
     let filePath = null;
     let password = null;
+    let maxSize = null;
 
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '-d' || args[i] === '--decode') {
@@ -190,10 +332,19 @@ const parseArgs = () => {
                 password = args[i + 1];
                 i++; // Skip next argument since we consumed it
             } else {
-                console.error('Error: --password requires a value');
-                console.log('Usage: node b64.mjs [-d|--decode] [-p|--password <password>] <file_path>');
-                console.log('       Password can also be set via B64_ECRY_PASSWORD environment variable');
-                process.exit(1);
+                printUsage('--password requires a value');
+            }
+        } else if (args[i] === '-s' || args[i] === '--size') {
+            // Get size from next argument
+            if (i + 1 < args.length) {
+                try {
+                    maxSize = parseSize(args[i + 1]);
+                    i++; // Skip next argument since we consumed it
+                } catch (err) {
+                    printUsage(err.message);
+                }
+            } else {
+                printUsage('--size requires a value');
             }
         } else if (!args[i].startsWith('-')) {
             filePath = args[i]; // Positional argument
@@ -201,13 +352,10 @@ const parseArgs = () => {
     }
 
     if (!filePath) {
-        console.error('Error: File path is required');
-        console.log('Usage: node b64.mjs [-d|--decode] [-p|--password <password>] <file_path>');
-        console.log('       Password can also be set via B64_ECRY_PASSWORD environment variable');
-        process.exit(1);
+        printUsage('File path is required');
     }
 
-    return { decode, filePath, password };
+    return { decode, filePath, password, maxSize };
 };
 
 /**
@@ -399,6 +547,95 @@ class Base64DecodeTransform extends Transform {
 }
 
 /**
+ * Writable stream that splits output into multiple files when size exceeds limit
+ * File naming: basePath_XXYY.ext where XX=total files, YY=file number (01-99)
+ */
+class SplitWriteStream extends Transform {
+    constructor(basePath, extension, maxSize, options) {
+        super(options);
+        this.basePath = basePath;
+        this.extension = extension;
+        this.maxSize = maxSize;
+        this.currentSize = 0;
+        this.fileIndex = 1;
+        this.files = [];
+        this.currentFd = null;
+        this.buffer = Buffer.alloc(0);
+        this._openNextFile();
+    }
+
+    _openNextFile() {
+        if (this.currentFd !== null) {
+            closeSync(this.currentFd);
+        }
+        // Temporary filename, will be renamed at the end
+        const tempPath = `${this.basePath}_temp_${String(this.fileIndex).padStart(2, '0')}${this.extension}`;
+        this.currentFd = openSync(tempPath, 'w');
+        this.files.push(tempPath);
+        this.currentSize = 0;
+    }
+
+    _transform(chunk, _encoding, callback) {
+        try {
+            let data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+
+            while (data.length > 0) {
+                const remaining = this.maxSize - this.currentSize;
+
+                if (data.length <= remaining) {
+                    // Fits in current file
+                    writeSync(this.currentFd, data);
+                    this.currentSize += data.length;
+                    data = Buffer.alloc(0);
+                } else {
+                    // Need to split
+                    const toWrite = data.subarray(0, remaining);
+                    writeSync(this.currentFd, toWrite);
+                    this.currentSize += toWrite.length;
+                    data = data.subarray(remaining);
+
+                    // Open next file
+                    this.fileIndex++;
+                    this._openNextFile();
+                }
+            }
+            callback();
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    _flush(callback) {
+        try {
+            if (this.currentFd !== null) {
+                closeSync(this.currentFd);
+                this.currentFd = null;
+            }
+
+            // Rename files with correct total count
+            const totalFiles = this.files.length;
+            const totalStr = String(totalFiles).padStart(2, '0');
+
+            this.finalPaths = [];
+            for (let i = 0; i < this.files.length; i++) {
+                const indexStr = String(i + 1).padStart(2, '0');
+                const finalPath = `${this.basePath}_${totalStr}${indexStr}${this.extension}`;
+                renameSync(this.files[i], finalPath);
+                this.finalPaths.push(finalPath);
+            }
+
+            callback();
+        } catch (err) {
+            callback(err);
+        }
+    }
+
+    getFinalPaths() {
+        return this.finalPaths || [];
+    }
+}
+
+/**
  * Transform stream to extract and skip the 96-byte header during decoding
  *
  * Header format (96 bytes):
@@ -556,12 +793,13 @@ class HeaderAndDecryptTransform extends Transform {
  *   4. Create 96-byte header with metadata
  *   5. Prepend header
  *   6. Base64 encode
- *   7. Write to .b64.txt file
+ *   7. Write to .b64.txt file (or split files if maxSize specified)
  *
  * @param {string} inputFilePath - Path to file to encode
  * @param {string} password - Encryption password (uses default if not provided)
+ * @param {number|null} maxSize - Maximum size per output file in bytes (null = no splitting)
  */
-const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
+const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD, maxSize = null) => {
     // Extract file extension
     const { ext: extension } = parsePath(inputFilePath);
 
@@ -573,13 +811,27 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
     const stats = statSync(inputFilePath);
     const fileSize = stats.size;
 
+    // Early check: validate split won't exceed 99 files
+    if (maxSize) {
+        // Estimate base64 output size: ~4/3 of (header + encrypted data)
+        const estimatedOutputSize = Math.ceil((HEADER_SIZE + fileSize) * 4 / 3);
+        const estimatedFiles = Math.ceil(estimatedOutputSize / maxSize);
+        if (estimatedFiles > 99) {
+            throw new Error(
+                `Output would require ~${estimatedFiles} files (max 99). ` +
+                `Increase --size to at least ${Math.ceil(estimatedOutputSize / 99)} bytes`
+            );
+        }
+    }
+
     // Generate random nonce and salt
     const nonce = randomBytes(16); // We'll use first 12 bytes for ChaCha20-Poly1305
     const salt = randomBytes(16);
 
     // console.log('Encrypting with ChaCha20-Poly1305...');
 
-    const outputPath = inputFilePath.replace(extension, '') + '.b64.txt';
+    const basePath = inputFilePath.replace(extension, '');
+    const outputPath = basePath + '.b64.txt';
 
     // Create header with placeholder authTag (all zeros)
     const placeholderHeader = new Header(extension, fileSize, nonce, salt, Buffer.alloc(16));
@@ -591,13 +843,25 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
     const encryptStream = new EncryptTransform(password, nonce, salt, aad);
 
     try {
+        let splitStream = null;
+        let outputStream;
+
+        if (maxSize) {
+            // Use split write stream for size-limited output
+            splitStream = new SplitWriteStream(basePath, '.b64.txt', maxSize);
+            outputStream = splitStream;
+        } else {
+            // Normal single file output
+            outputStream = createWriteStream(outputPath);
+        }
+
         // Stream: file → encrypt (with AAD) → prepend header → base64 → output
         await pipeline(
             createReadStream(inputFilePath, { highWaterMark: CHUNK_SIZE }),
             encryptStream,
             new PrependHeaderTransform(headerBuffer),
             new Base64EncodeTransform(),
-            createWriteStream(outputPath)
+            outputStream
         );
 
         // Get authTag after encryption completes
@@ -610,14 +874,27 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         // Base64 encode the entire updated header (96 bytes → 128 base64 chars)
         const encodedHeader = headerBuffer.toString('base64');
 
-        // Replace the header in the output file from position 0
-        const fd = openSync(outputPath, 'r+');
-        const written = writeSync(fd, encodedHeader, 0, 'utf8');
-        closeSync(fd);
+        if (splitStream) {
+            // Update header in the first split file
+            const finalPaths = splitStream.getFinalPaths();
+            if (finalPaths.length > 0) {
+                const fd = openSync(finalPaths[0], 'r+');
+                writeSync(fd, encodedHeader, 0, 'utf8');
+                closeSync(fd);
+            }
 
-        // console.log(`Updated authTag in header (${written} bytes written)`);
+            console.log(`Encoded: ${inputFilePath} -> ${finalPaths.length} files:`);
+            for (const path of finalPaths) {
+                console.log(`  ${path}`);
+            }
+        } else {
+            // Replace the header in the single output file
+            const fd = openSync(outputPath, 'r+');
+            writeSync(fd, encodedHeader, 0, 'utf8');
+            closeSync(fd);
 
-        console.log(`Encoded: ${inputFilePath} -> ${outputPath}`);
+            console.log(`Encoded: ${inputFilePath} -> ${outputPath}`);
+        }
         // console.log(`  Size: ${fileSize} bytes`);
         // console.log(`  Cipher: ChaCha20-Poly1305`);
     } catch (err) {
@@ -628,14 +905,16 @@ const encodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
 
 /**
  * Decode a .b64.txt file back to its original format
+ * Automatically detects and handles split files (filename_XXYY.b64.txt pattern)
  *
  * Process flow (single streaming pipeline):
- *   1. Read .b64.txt file in 192KB chunks (streaming)
- *   2. Base64 decode
- *   3. Extract and validate 96-byte header
- *   4. Decrypt with ChaCha20-Poly1305 using header info
- *   5. Write to original filename with correct extension
- *   6. Verify authentication tag at end (delete output if tampered)
+ *   1. Detect if input is a split file, gather all parts if so
+ *   2. Read file(s) in 192KB chunks (streaming)
+ *   3. Base64 decode
+ *   4. Extract and validate 96-byte header
+ *   5. Decrypt with ChaCha20-Poly1305 using header info
+ *   6. Write to original filename with correct extension
+ *   7. Verify authentication tag at end (delete output if tampered)
  *
  * @param {string} inputFilePath - Path to .b64.txt file to decode
  * @param {string} password - Decryption password (uses default if not provided)
@@ -646,16 +925,39 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         throw new Error('Only can decode file end with .b64.txt file');
     }
 
+    // Check if this is a split file and get all parts
+    let inputStream;
+    let splitFilePaths = null;
+    let outputPath;
+
+    try {
+        splitFilePaths = getSplitFilePaths(inputFilePath);
+    } catch (err) {
+        // getSplitFilePaths throws if parts are missing
+        throw err;
+    }
+
+    if (splitFilePaths) {
+        // Split file detected - combine all parts
+        console.log(`Detected split file with ${splitFilePaths.length} parts`);
+        inputStream = new CombineSplitFilesReadable(splitFilePaths);
+
+        // Output path based on the base path (remove _XXYY.b64.txt suffix)
+        const parsed = parseSplitFileName(inputFilePath);
+        outputPath = parsed.basePath;
+    } else {
+        // Single file
+        inputStream = createReadStream(inputFilePath, { encoding: 'utf8', highWaterMark: CHUNK_SIZE });
+        outputPath = inputFilePath.replace('.b64.txt', '');
+    }
+
     // Create combined header extraction + decryption stream
     const headerAndDecryptStream = new HeaderAndDecryptTransform(password);
-
-    // Determine output path (will use header extension after parsing)
-    let outputPath = inputFilePath.replace('.b64.txt', '');
 
     try {
         // Single streaming pipeline: read → base64 decode → header+decrypt → output
         await pipeline(
-            createReadStream(inputFilePath, { encoding: 'utf8', highWaterMark: CHUNK_SIZE }),
+            inputStream,
             new Base64DecodeTransform(),
             headerAndDecryptStream,
             createWriteStream(outputPath)
@@ -671,7 +973,11 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
             outputPath = finalPath;
         }
 
-        console.log(`Decoded: ${inputFilePath} -> ${outputPath}`);
+        if (splitFilePaths) {
+            console.log(`Decoded: ${splitFilePaths.length} split files -> ${outputPath}`);
+        } else {
+            console.log(`Decoded: ${inputFilePath} -> ${outputPath}`);
+        }
         // console.log(`  Size: ${header.fileSize} bytes`);
         // console.log(`  Cipher: ChaCha20-Poly1305`);
     } catch (err) {
@@ -703,7 +1009,7 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
  */
 const main = async () => {
     try {
-        const { decode, filePath, password } = parseArgs();
+        const { decode, filePath, password, maxSize } = parseArgs();
 
         // Password priority: CLI flag > Environment variable > Default only
         let userPassword = password;
@@ -715,9 +1021,13 @@ const main = async () => {
         const finalPassword = userPassword ? userPassword + DEFAULT_PASSWORD : DEFAULT_PASSWORD;
 
         if (decode) {
+            if (maxSize) {
+                console.error('Error: --size option cannot be used when decoding');
+                process.exit(1);
+            }
             await decodeFile(filePath, finalPassword);
         } else {
-            await encodeFile(filePath, finalPassword);
+            await encodeFile(filePath, finalPassword, maxSize);
         }
     } catch (error) {
         console.error(`Error: ${error.message}`);

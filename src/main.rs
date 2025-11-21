@@ -1,12 +1,13 @@
 //! b64 - Base64 encoder/decoder with ChaCha20-Poly1305 encryption
 //!
 //! Encodes files to base64 with authenticated encryption and file extension preservation.
-//! Uses streaming to handle large files (5GB+) without loading into memory.
-//! Features: ChaCha20-Poly1305 AEAD, PBKDF2 key derivation, tamper detection
+//! Features: ChaCha20-Poly1305 AEAD, PBKDF2 key derivation, tamper detection, file splitting
 //!
 //! Usage:
-//!   Encode: b64 <file>
-//!   Decode: b64 -d <file.b64.txt>
+//!   Encode: b64 [-p <password>] [-s <size>] <file>
+//!   Decode: b64 -d [-p <password>] <file.b64.txt>
+//!
+//! Split files (e.g., file_0301.b64.txt) are auto-detected and combined when decoding.
 
 use base64::prelude::*;
 use chacha20poly1305::{
@@ -36,6 +37,69 @@ const DEFAULT_PASSWORD: &str = "xK9$mP2vL#nQ8wR@jF5yT!hB7dC*sE4uA6zN&gH3iV%oW1eX
 // PBKDF2 iterations (matching JS version)
 const PBKDF2_ITERATIONS: u32 = 100_000;
 
+/// Parsed split file name info
+struct SplitFileInfo {
+    base_path: String,
+    total_files: u32,
+    #[allow(dead_code)]
+    file_index: u32,
+}
+
+/// Parse split file name pattern: baseName_XXYY.b64.txt
+/// where XX = total files, YY = file index (01-99)
+fn parse_split_file_name(file_path: &str) -> Option<SplitFileInfo> {
+    // Must end with .b64.txt
+    let without_ext = file_path.strip_suffix(".b64.txt")?;
+
+    // Must have _XXYY pattern at end (4 digits)
+    if without_ext.len() < 5 {
+        return None;
+    }
+
+    let (base, digits) = without_ext.rsplit_once('_')?;
+
+    if digits.len() != 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let total_files: u32 = digits[0..2].parse().ok()?;
+    let file_index: u32 = digits[2..4].parse().ok()?;
+
+    // Validate: index should be between 1 and total
+    if file_index < 1 || file_index > total_files || total_files > 99 {
+        return None;
+    }
+
+    Some(SplitFileInfo {
+        base_path: base.to_string(),
+        total_files,
+        file_index,
+    })
+}
+
+/// Get all split file paths for a given split file
+fn get_split_file_paths(file_path: &str) -> io::Result<Option<Vec<String>>> {
+    let info = match parse_split_file_name(file_path) {
+        Some(info) => info,
+        None => return Ok(None),
+    };
+
+    let mut paths = Vec::new();
+
+    for i in 1..=info.total_files {
+        let part_path = format!("{}_{:02}{:02}.b64.txt", info.base_path, info.total_files, i);
+        if !Path::new(&part_path).exists() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Missing split file part: {}", part_path),
+            ));
+        }
+        paths.push(part_path);
+    }
+
+    Ok(Some(paths))
+}
+
 /// Encode a file to base64 txt file with ChaCha20-Poly1305 encryption, or decode it
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -49,9 +113,34 @@ struct Args {
     #[arg(short, long)]
     password: Option<String>,
 
+    /// Maximum size per output file (e.g., 5mb, 500kb, 1gb). If output exceeds this,
+    /// splits into multiple files named filename_XXYY.b64.txt (XX=total, YY=index)
+    #[arg(short, long, value_parser = parse_size)]
+    size: Option<usize>,
+
     /// The file path to encode/decode
     #[arg(index = 1)]
     file: String,
+}
+
+/// Parse size string to bytes (e.g., "5mb", "500kb", "1gb")
+fn parse_size(s: &str) -> Result<usize, String> {
+    let s = s.to_lowercase();
+    let (num_str, unit) = if s.ends_with("gb") {
+        (&s[..s.len()-2], 1024 * 1024 * 1024)
+    } else if s.ends_with("mb") {
+        (&s[..s.len()-2], 1024 * 1024)
+    } else if s.ends_with("kb") {
+        (&s[..s.len()-2], 1024)
+    } else if s.ends_with("b") {
+        (&s[..s.len()-1], 1)
+    } else {
+        (s.as_str(), 1)
+    };
+
+    num_str.trim().parse::<f64>()
+        .map(|n| (n * unit as f64) as usize)
+        .map_err(|_| format!("Invalid size format: {}. Use format like '5mb', '500kb', '1gb'", s))
 }
 
 /// Header field offsets for 96-byte binary layout
@@ -281,8 +370,8 @@ fn derive_key(password: &str, salt: &[u8; 16]) -> [u8; 32] {
 ///   4. Create 96-byte header with metadata
 ///   5. Prepend header
 ///   6. Base64 encode
-///   7. Write to .b64.txt file
-fn encode_file(input_path: &str, password: &str) -> io::Result<()> {
+///   7. Write to .b64.txt file (or split files if max_size specified)
+fn encode_file(input_path: &str, password: &str, max_size: Option<usize>) -> io::Result<()> {
     let path = Path::new(input_path);
 
     // Extract file extension
@@ -304,6 +393,23 @@ fn encode_file(input_path: &str, password: &str) -> io::Result<()> {
 
     // Get file size
     let file_size = std::fs::metadata(input_path)?.len();
+
+    // Early check: validate split won't exceed 99 files
+    if let Some(max_size) = max_size {
+        // Estimate base64 output size: ~4/3 of (header + encrypted data)
+        let estimated_output_size = ((HEADER_SIZE as u64 + file_size) * 4 / 3) as usize;
+        let estimated_files = (estimated_output_size + max_size - 1) / max_size;
+        if estimated_files > 99 {
+            let min_size = (estimated_output_size + 98) / 99; // ceil division
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Output would require ~{} files (max 99). Increase --size to at least {} bytes",
+                    estimated_files, min_size
+                ),
+            ));
+        }
+    }
 
     // Generate random nonce and salt
     let mut rng = rand::thread_rng();
@@ -360,26 +466,54 @@ fn encode_file(input_path: &str, password: &str) -> io::Result<()> {
     // Base64 encode
     let encoded = BASE64_STANDARD.encode(&output_buffer);
 
-    // Write to output file
-    let output_path = input_path.trim_end_matches(&extension).to_string() + ".b64.txt";
-    let output_file = File::create(&output_path)?;
-    let mut writer = BufWriter::new(output_file);
-    writer.write_all(encoded.as_bytes())?;
+    // Base path for output files
+    let base_path = input_path.trim_end_matches(&extension).to_string();
 
-    println!("Encoded: {} -> {}", input_path, output_path);
+    // Handle splitting if max_size is specified
+    if let Some(max_size) = max_size {
+        let encoded_bytes = encoded.as_bytes();
+        let total_files = (encoded_bytes.len() + max_size - 1) / max_size;
+
+        // Note: Early check above ensures total_files <= 99
+        let mut output_paths = Vec::new();
+
+        for (i, chunk) in encoded_bytes.chunks(max_size).enumerate() {
+            let file_num = i + 1;
+            let output_path = format!("{}_{:02}{:02}.b64.txt", base_path, total_files, file_num);
+            let output_file = File::create(&output_path)?;
+            let mut writer = BufWriter::new(output_file);
+            writer.write_all(chunk)?;
+            output_paths.push(output_path);
+        }
+
+        println!("Encoded: {} -> {} files:", input_path, output_paths.len());
+        for path in &output_paths {
+            println!("  {}", path);
+        }
+    } else {
+        // Single file output
+        let output_path = base_path + ".b64.txt";
+        let output_file = File::create(&output_path)?;
+        let mut writer = BufWriter::new(output_file);
+        writer.write_all(encoded.as_bytes())?;
+
+        println!("Encoded: {} -> {}", input_path, output_path);
+    }
 
     Ok(())
 }
 
 /// Decode a .b64.txt file back to its original format
+/// Automatically detects and handles split files (filename_XXYY.b64.txt pattern)
 ///
 /// Process flow:
-///   1. Read .b64.txt file
-///   2. Base64 decode
-///   3. Extract and validate 96-byte header
-///   4. Decrypt with ChaCha20-Poly1305 using header info
-///   5. Write to original filename with correct extension
-///   6. Verify authentication tag (delete output if tampered)
+///   1. Detect if input is a split file, gather all parts if so
+///   2. Read .b64.txt file(s)
+///   3. Base64 decode
+///   4. Extract and validate 96-byte header
+///   5. Decrypt with ChaCha20-Poly1305 using header info
+///   6. Write to original filename with correct extension
+///   7. Verify authentication tag (delete output if tampered)
 fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
     // Validate input file extension
     if !input_path.ends_with(".b64.txt") {
@@ -389,11 +523,29 @@ fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
         ));
     }
 
-    // Read and decode file
-    let input_file = File::open(input_path)?;
-    let mut reader = BufReader::new(input_file);
-    let mut encoded_string = String::new();
-    reader.read_to_string(&mut encoded_string)?;
+    // Check if this is a split file and get all parts
+    let split_file_paths = get_split_file_paths(input_path)?;
+    let (encoded_string, output_base_path) = if let Some(paths) = &split_file_paths {
+        // Split file detected - combine all parts
+        println!("Detected split file with {} parts", paths.len());
+        let mut combined = String::new();
+        for path in paths {
+            let input_file = File::open(path)?;
+            let mut reader = BufReader::new(input_file);
+            reader.read_to_string(&mut combined)?;
+        }
+        // Output path based on the base path (remove _XXYY.b64.txt suffix)
+        let info = parse_split_file_name(input_path).unwrap();
+        (combined, info.base_path)
+    } else {
+        // Single file
+        let input_file = File::open(input_path)?;
+        let mut reader = BufReader::new(input_file);
+        let mut encoded_string = String::new();
+        reader.read_to_string(&mut encoded_string)?;
+        let output_base_path = input_path.trim_end_matches(".b64.txt").to_string();
+        (encoded_string, output_base_path)
+    };
 
     // Base64 decode
     let decoded = BASE64_STANDARD.decode(&encoded_string).map_err(|e| {
@@ -434,12 +586,16 @@ fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
     })?;
 
     // Write to output file
-    let output_path = input_path.trim_end_matches(".b64.txt").to_string() + &header.extension;
+    let output_path = output_base_path + &header.extension;
     let output_file = File::create(&output_path)?;
     let mut writer = BufWriter::new(output_file);
     writer.write_all(&plaintext)?;
 
-    println!("Decoded: {} -> {}", input_path, output_path);
+    if let Some(paths) = split_file_paths {
+        println!("Decoded: {} split files -> {}", paths.len(), output_path);
+    } else {
+        println!("Decoded: {} -> {}", input_path, output_path);
+    }
 
     Ok(())
 }
@@ -457,9 +613,13 @@ fn main() -> io::Result<()> {
     };
 
     if args.decode {
+        if args.size.is_some() {
+            eprintln!("Error: --size option cannot be used when decoding");
+            std::process::exit(1);
+        }
         decode_file(&args.file, &final_password)?;
     } else {
-        encode_file(&args.file, &final_password)?;
+        encode_file(&args.file, &final_password, args.size)?;
     }
 
     Ok(())

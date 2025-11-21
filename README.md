@@ -11,6 +11,7 @@ A high-performance file encoder that combines ChaCha20-Poly1305 authenticated en
 - 🛡️ **Tamper Detection** - Authentication tag verification ensures file integrity
 - 🔄 **Cross-Compatible** - Rust and JavaScript versions can encode/decode each other's files
 - ⚡ **Streaming Support** - Handles large files (5GB+) without excessive memory usage
+- ✂️ **File Splitting** - Split large outputs into multiple files with auto-reassembly on decode
 
 ## Installation
 
@@ -66,6 +67,40 @@ node src/b64.mjs -d <file.b64.txt>
 ./target/release/b64 -d document.b64.txt
 # Restores: document.pdf
 ```
+
+### Splitting Large Files
+
+Use the `-s` or `--size` option to split output into multiple files (encode only):
+
+**Rust:**
+```bash
+./target/release/b64 -s 5mb document.pdf
+# Creates: document_0301.b64.txt, document_0302.b64.txt, document_0303.b64.txt
+```
+
+**JavaScript:**
+```bash
+node src/b64.mjs -s 5mb document.pdf
+# Creates: document_0301.b64.txt, document_0302.b64.txt, document_0303.b64.txt
+```
+
+The naming format is `filename_XXYY.b64.txt` where:
+- `XX` = total number of files (01-99)
+- `YY` = file index (01-XX)
+
+### Decoding Split Files
+
+When decoding, simply pass any one of the split files - all parts are automatically detected and combined:
+
+```bash
+# Any of these will decode all 3 parts:
+./target/release/b64 -d document_0301.b64.txt
+./target/release/b64 -d document_0302.b64.txt
+./target/release/b64 -d document_0303.b64.txt
+# All restore: document.pdf
+```
+
+**Note:** The `-s` option cannot be used with `-d` (decode mode).
 
 ## Password Configuration
 
@@ -349,6 +384,7 @@ python3 benchmark.py
 Contributions welcome! Areas of interest:
 - [ ] Implement true streaming in Rust
 - [x] ~~Add password CLI option~~ (Completed: `-p` flag and `B64_ECRY_PASSWORD` env var)
+- [x] ~~Add file splitting support~~ (Completed: `-s` flag with auto-reassembly)
 - [ ] Add compression support
 - [ ] Multi-threaded encryption for large files
 - [ ] Progress indicators
@@ -356,7 +392,13 @@ Contributions welcome! Areas of interest:
 
 ## Changelog
 
-### v0.2.0 (Current)
+### v0.3.0 (Current)
+- **Added**: File splitting with `-s`/`--size` option for encoding
+- **Added**: Auto-detection and reassembly of split files when decoding
+- **Changed**: `-s` option now errors when used with `-d` (decode mode)
+- Full backward compatibility with v0.2.0
+
+### v0.2.0
 - **Added**: Custom password support via `-p`/`--password` CLI flag
 - **Added**: `B64_ECRY_PASSWORD` environment variable support
 - **Added**: Password priority system (CLI > Environment > Default)
