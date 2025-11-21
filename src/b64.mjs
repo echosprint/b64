@@ -953,7 +953,7 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
         console.log(`Detected split file with ${splitFilePaths.length} parts`);
         inputStream = new CombineSplitFilesReadable(splitFilePaths);
 
-        // Output path based on the base path (remove _XXYY.b64.txt suffix)
+        // Output path based on the base path (remove _sXXpYY.b64.txt suffix)
         const parsed = parseSplitFileName(inputFilePath);
         outputPath = parsed.basePath;
     } else {
