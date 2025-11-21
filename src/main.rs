@@ -17,6 +17,7 @@ use clap::Parser;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use sha2::Sha256;
+use std::env;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
@@ -43,7 +44,8 @@ struct Args {
     #[arg(short, long, action)]
     decode: bool,
 
-    /// Password to use for encryption/decryption (concatenated with default password)
+    /// Password to use for encryption/decryption (concatenated with default password).
+    /// If not provided, uses B64_ECRY_PASSWORD environment variable if set
     #[arg(short, long)]
     password: Option<String>,
 
@@ -445,9 +447,12 @@ fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    // Password priority: CLI flag > Environment variable > Default only
+    let user_password = args.password.or_else(|| env::var("B64_ECRY_PASSWORD").ok());
+
     // Concatenate user password with default password if provided
-    let final_password = match &args.password {
-        Some(user_password) => format!("{}{}", user_password, DEFAULT_PASSWORD),
+    let final_password = match user_password {
+        Some(pwd) => format!("{}{}", pwd, DEFAULT_PASSWORD),
         None => DEFAULT_PASSWORD.to_string(),
     };
 

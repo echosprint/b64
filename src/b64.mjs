@@ -192,6 +192,7 @@ const parseArgs = () => {
             } else {
                 console.error('Error: --password requires a value');
                 console.log('Usage: node b64.mjs [-d|--decode] [-p|--password <password>] <file_path>');
+                console.log('       Password can also be set via B64_ECRY_PASSWORD environment variable');
                 process.exit(1);
             }
         } else if (!args[i].startsWith('-')) {
@@ -202,6 +203,7 @@ const parseArgs = () => {
     if (!filePath) {
         console.error('Error: File path is required');
         console.log('Usage: node b64.mjs [-d|--decode] [-p|--password <password>] <file_path>');
+        console.log('       Password can also be set via B64_ECRY_PASSWORD environment variable');
         process.exit(1);
     }
 
@@ -703,8 +705,14 @@ const main = async () => {
     try {
         const { decode, filePath, password } = parseArgs();
 
+        // Password priority: CLI flag > Environment variable > Default only
+        let userPassword = password;
+        if (!userPassword && process.env.B64_ECRY_PASSWORD) {
+            userPassword = process.env.B64_ECRY_PASSWORD;
+        }
+
         // Concatenate user password with default password if provided
-        const finalPassword = password ? password + DEFAULT_PASSWORD : DEFAULT_PASSWORD;
+        const finalPassword = userPassword ? userPassword + DEFAULT_PASSWORD : DEFAULT_PASSWORD;
 
         if (decode) {
             await decodeFile(filePath, finalPassword);
