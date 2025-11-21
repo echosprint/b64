@@ -6,6 +6,7 @@ A high-performance file encoder that combines ChaCha20-Poly1305 authenticated en
 
 - 🔒 **ChaCha20-Poly1305 AEAD Encryption** - Authenticated encryption with tamper detection
 - 🔑 **PBKDF2 Key Derivation** - Secure password-based key generation (100,000 iterations, SHA-256)
+- 🔐 **Custom Password Support** - CLI flag (`-p`) and environment variable (`B64_ECRY_PASSWORD`)
 - 📦 **File Extension Preservation** - Automatically restores original file extensions
 - 🛡️ **Tamper Detection** - Authentication tag verification ensures file integrity
 - 🔄 **Cross-Compatible** - Rust and JavaScript versions can encode/decode each other's files
@@ -64,6 +65,91 @@ node src/b64.mjs -d <file.b64.txt>
 ```bash
 ./target/release/b64 -d document.b64.txt
 # Restores: document.pdf
+```
+
+## Password Configuration
+
+Both implementations support custom passwords for encryption/decryption. Passwords are concatenated with a built-in default password for additional security.
+
+### Password Priority
+
+1. **CLI Flag** (highest priority): `-p` or `--password`
+2. **Environment Variable**: `B64_ECRY_PASSWORD`
+3. **Default Only**: Built-in default password
+
+### Using CLI Password
+
+**Rust:**
+```bash
+# Encode with password
+./target/release/b64 -p "mySecret" document.pdf
+
+# Decode with password
+./target/release/b64 -d -p "mySecret" document.b64.txt
+```
+
+**JavaScript:**
+```bash
+# Encode with password
+node src/b64.mjs -p "mySecret" document.pdf
+
+# Decode with password
+node src/b64.mjs -d -p "mySecret" document.b64.txt
+```
+
+**Note:** Always use quotes around passwords containing spaces or special characters:
+```bash
+./target/release/b64 -p 'P@$$w0rd!#$%' file.txt
+```
+
+### Using Environment Variable
+
+Set the `B64_ECRY_PASSWORD` environment variable to avoid typing the password repeatedly:
+
+**Rust:**
+```bash
+# Set password for current session
+export B64_ECRY_PASSWORD="mySecret"
+
+# Encode multiple files without typing password
+./target/release/b64 file1.pdf
+./target/release/b64 file2.txt
+./target/release/b64 -d file1.b64.txt
+```
+
+**JavaScript:**
+```bash
+# Set password for current session
+export B64_ECRY_PASSWORD="mySecret"
+
+# Encode/decode without typing password
+node src/b64.mjs file1.pdf
+node src/b64.mjs -d file1.b64.txt
+```
+
+**CLI flag overrides environment variable:**
+```bash
+export B64_ECRY_PASSWORD="envPassword"
+./target/release/b64 -p "cliPassword" file.txt  # Uses "cliPassword"
+```
+
+### Cross-Implementation Compatibility
+
+Files encrypted with the same password work across both implementations:
+
+```bash
+# Encode with Rust
+./target/release/b64 -p "shared" document.pdf
+
+# Decode with JavaScript
+node src/b64.mjs -d -p "shared" document.b64.txt
+```
+
+Environment variables work identically:
+```bash
+export B64_ECRY_PASSWORD="shared"
+./target/release/b64 file.txt
+node src/b64.mjs -d file.b64.txt  # Works!
 ```
 
 ## File Format Specification
@@ -175,8 +261,17 @@ node src/b64.mjs file.txt
 ./target/release/b64 -d file.b64.txt
 ```
 
+**Custom passwords work across implementations:**
+```bash
+# Encode with Rust using password
+./target/release/b64 -p "secret" file.txt
+
+# Decode with JavaScript using same password
+node src/b64.mjs -d -p "secret" file.b64.txt
+```
+
 Both use the same:
-- Default password
+- Password handling (CLI flags, environment variables, and default)
 - PBKDF2 parameters (100,000 iterations, SHA-256)
 - ChaCha20-Poly1305 AEAD configuration
 - Header format (96 bytes)
@@ -253,7 +348,7 @@ python3 benchmark.py
 
 Contributions welcome! Areas of interest:
 - [ ] Implement true streaming in Rust
-- [ ] Add password CLI option
+- [x] ~~Add password CLI option~~ (Completed: `-p` flag and `B64_ECRY_PASSWORD` env var)
 - [ ] Add compression support
 - [ ] Multi-threaded encryption for large files
 - [ ] Progress indicators
@@ -261,7 +356,14 @@ Contributions welcome! Areas of interest:
 
 ## Changelog
 
-### v0.1.0 (Current)
+### v0.2.0 (Current)
+- **Added**: Custom password support via `-p`/`--password` CLI flag
+- **Added**: `B64_ECRY_PASSWORD` environment variable support
+- **Added**: Password priority system (CLI > Environment > Default)
+- **Updated**: Cross-implementation password compatibility
+- Full backward compatibility with v0.1.0 (default password unchanged)
+
+### v0.1.0
 - Initial implementation
 - ChaCha20-Poly1305 AEAD encryption
 - PBKDF2 key derivation
