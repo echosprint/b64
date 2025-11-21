@@ -11,7 +11,7 @@
  *   Encode: node b64.mjs [-p <password>] [-s <size>] <file>
  *   Decode: node b64.mjs -d [-p <password>] <file.b64.txt>
  *
- * Split files (e.g., file_0301.b64.txt) are auto-detected and combined when decoding.
+ * Split files (e.g., file_s03p01.b64.txt) are auto-detected and combined when decoding.
  */
 
 import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync, readdirSync } from 'fs';
@@ -52,13 +52,13 @@ const parseSize = (sizeStr) => {
 };
 
 /**
- * Parse split file name pattern: baseName_XXYY.b64.txt
- * where XX = total files, YY = file index (01-99)
+ * Parse split file name pattern: baseName_sXXpYY.b64.txt
+ * where s = split marker, XX = total files, p = part marker, YY = file index (01-99)
  * @param {string} filePath - Path to check
  * @returns {Object|null} { basePath, totalFiles, fileIndex } or null if not a split file
  */
 const parseSplitFileName = (filePath) => {
-    const match = filePath.match(/^(.+)_(\d{2})(\d{2})\.b64\.txt$/);
+    const match = filePath.match(/^(.+)_s(\d{2})p(\d{2})\.b64\.txt$/);
     if (!match) return null;
 
     const [, basePath, totalStr, indexStr] = match;
@@ -86,7 +86,7 @@ const getSplitFilePaths = (filePath) => {
     const paths = [];
 
     for (let i = 1; i <= totalFiles; i++) {
-        const partPath = `${basePath}_${String(totalFiles).padStart(2, '0')}${String(i).padStart(2, '0')}.b64.txt`;
+        const partPath = `${basePath}_s${String(totalFiles).padStart(2, '0')}p${String(i).padStart(2, '0')}.b64.txt`;
         if (!existsSync(partPath)) {
             throw new Error(`Missing split file part: ${partPath}`);
         }
@@ -308,7 +308,7 @@ const printUsage = (error = null) => {
     console.log('  -p, --password <password> Custom password (or set B64_ECRY_PASSWORD env var)');
     console.log('  -s, --size <size>         Max output file size, e.g., 5mb, 500kb (encode only)');
     console.log('Note:');
-    console.log('  Split files (e.g., file_0301.b64.txt) are auto-detected when decoding.');
+    console.log('  Split files (e.g., file_s03p01.b64.txt) are auto-detected when decoding.');
     process.exit(error ? 1 : 0);
 };
 
@@ -623,7 +623,7 @@ class SplitWriteStream extends Transform {
             this.finalPaths = [];
             for (let i = 0; i < this.files.length; i++) {
                 const indexStr = String(i + 1).padStart(2, '0');
-                const finalPath = `${this.basePath}_${totalStr}${indexStr}${this.extension}`;
+                const finalPath = `${this.basePath}_s${totalStr}p${indexStr}${this.extension}`;
                 renameSync(this.files[i], finalPath);
                 this.finalPaths.push(finalPath);
             }

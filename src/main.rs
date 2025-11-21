@@ -7,7 +7,7 @@
 //!   Encode: b64 [-p <password>] [-s <size>] <file>
 //!   Decode: b64 -d [-p <password>] <file.b64.txt>
 //!
-//! Split files (e.g., file_0301.b64.txt) are auto-detected and combined when decoding.
+//! Split files (e.g., file_s03p01.b64.txt) are auto-detected and combined when decoding.
 
 use base64::prelude::*;
 use chacha20poly1305::{
@@ -46,25 +46,39 @@ struct SplitFileInfo {
     file_index: u32,
 }
 
-/// Parse split file name pattern: baseName_XXYY.b64.txt
-/// where XX = total files, YY = file index (01-99)
+/// Parse split file name pattern: baseName_sXXpYY.b64.txt
+/// where s = split marker, XX = total files, p = part marker, YY = file index (01-99)
 fn parse_split_file_name(file_path: &str) -> Option<SplitFileInfo> {
     // Must end with .b64.txt
     let without_ext = file_path.strip_suffix(".b64.txt")?;
 
-    // Must have _XXYY pattern at end (4 digits)
-    if without_ext.len() < 5 {
+    // Must have _sXXpYY pattern at end (7 chars: _s##p##)
+    if without_ext.len() < 8 {
         return None;
     }
 
-    let (base, digits) = without_ext.rsplit_once('_')?;
+    let (base, pattern) = without_ext.rsplit_once('_')?;
 
-    if digits.len() != 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
+    // Pattern must be sXXpYY (6 chars)
+    if pattern.len() != 6 {
         return None;
     }
 
-    let total_files: u32 = digits[0..2].parse().ok()?;
-    let file_index: u32 = digits[2..4].parse().ok()?;
+    // Check format: s##p##
+    if !pattern.starts_with('s') || pattern.chars().nth(3) != Some('p') {
+        return None;
+    }
+
+    let total_str = &pattern[1..3];
+    let index_str = &pattern[4..6];
+
+    if !total_str.chars().all(|c| c.is_ascii_digit())
+        || !index_str.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let total_files: u32 = total_str.parse().ok()?;
+    let file_index: u32 = index_str.parse().ok()?;
 
     // Validate: index should be between 1 and total
     if file_index < 1 || file_index > total_files || total_files > 99 {
@@ -88,7 +102,7 @@ fn get_split_file_paths(file_path: &str) -> io::Result<Option<Vec<String>>> {
     let mut paths = Vec::new();
 
     for i in 1..=info.total_files {
-        let part_path = format!("{}_{:02}{:02}.b64.txt", info.base_path, info.total_files, i);
+        let part_path = format!("{}_s{:02}p{:02}.b64.txt", info.base_path, info.total_files, i);
         if !Path::new(&part_path).exists() {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -486,7 +500,7 @@ fn encode_file(input_path: &str, password: &str, max_size: Option<usize>) -> io:
 
         for (i, chunk) in encoded_bytes.chunks(max_size).enumerate() {
             let file_num = i + 1;
-            let output_path = format!("{}_{:02}{:02}.b64.txt", base_path, total_files, file_num);
+            let output_path = format!("{}_s{:02}p{:02}.b64.txt", base_path, total_files, file_num);
             let output_file = File::create(&output_path)?;
             let mut writer = BufWriter::new(output_file);
             writer.write_all(chunk)?;

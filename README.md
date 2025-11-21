@@ -75,17 +75,19 @@ Use the `-s` or `--size` option to split output into multiple files (encode only
 **Rust:**
 ```bash
 ./target/release/b64 -s 5mb document.pdf
-# Creates: document_0301.b64.txt, document_0302.b64.txt, document_0303.b64.txt
+# Creates: document_s03p01.b64.txt, document_s03p02.b64.txt, document_s03p03.b64.txt
 ```
 
 **JavaScript:**
 ```bash
 node src/b64.mjs -s 5mb document.pdf
-# Creates: document_0301.b64.txt, document_0302.b64.txt, document_0303.b64.txt
+# Creates: document_s03p01.b64.txt, document_s03p02.b64.txt, document_s03p03.b64.txt
 ```
 
-The naming format is `filename_XXYY.b64.txt` where:
+The naming format is `filename_sXXpYY.b64.txt` where:
+- `s` = split marker
 - `XX` = total number of files (01-99)
+- `p` = part marker
 - `YY` = file index (01-XX)
 
 ### Decoding Split Files
@@ -94,9 +96,9 @@ When decoding, simply pass any one of the split files - all parts are automatica
 
 ```bash
 # Any of these will decode all 3 parts:
-./target/release/b64 -d document_0301.b64.txt
-./target/release/b64 -d document_0302.b64.txt
-./target/release/b64 -d document_0303.b64.txt
+./target/release/b64 -d document_s03p01.b64.txt
+./target/release/b64 -d document_s03p02.b64.txt
+./target/release/b64 -d document_s03p03.b64.txt
 # All restore: document.pdf
 ```
 
