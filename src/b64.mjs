@@ -106,10 +106,18 @@ class CombineSplitFilesReadable extends Readable {
         this.filePaths = filePaths;
         this.currentIndex = 0;
         this.currentStream = null;
+        this.isPaused = false;
     }
 
     _read() {
-        // If we have a current stream, let it push data
+        // If we have a paused stream, resume it
+        if (this.currentStream && this.isPaused) {
+            this.isPaused = false;
+            this.currentStream.resume();
+            return;
+        }
+
+        // If we have an active stream, let it push data
         if (this.currentStream) return;
 
         // If no more files, signal end
@@ -125,12 +133,14 @@ class CombineSplitFilesReadable extends Readable {
         this.currentStream.on('data', (chunk) => {
             // Pause the file stream if buffer is full
             if (!this.push(chunk)) {
+                this.isPaused = true;
                 this.currentStream.pause();
             }
         });
 
         this.currentStream.on('end', () => {
             this.currentStream = null;
+            this.isPaused = false;
             this.currentIndex++;
             // Continue reading from next file
             this._read();
@@ -139,9 +149,6 @@ class CombineSplitFilesReadable extends Readable {
         this.currentStream.on('error', (err) => {
             this.destroy(err);
         });
-
-        // Resume if we were paused
-        this.currentStream.resume();
     }
 
     _destroy(err, callback) {
