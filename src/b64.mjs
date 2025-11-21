@@ -965,24 +965,25 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
     // Create combined header extraction + decryption stream
     const headerAndDecryptStream = new HeaderAndDecryptTransform(password);
 
+    // Use .tmp extension during decode to avoid incomplete files with final name
+    const tempPath = outputPath + '.tmp';
+
     try {
         // Single streaming pipeline: read → base64 decode → header+decrypt → output
         await pipeline(
             inputStream,
             new Base64DecodeTransform(),
             headerAndDecryptStream,
-            createWriteStream(outputPath)
+            createWriteStream(tempPath)
         );
 
         // Get final output path with extension
         const header = headerAndDecryptStream.getHeader();
         const finalPath = outputPath + header.extension;
 
-        // Rename file to include proper extension
-        if (header.extension) {
-            renameSync(outputPath, finalPath);
-            outputPath = finalPath;
-        }
+        // Rename temp file to final path with proper extension
+        renameSync(tempPath, finalPath);
+        outputPath = finalPath;
 
         if (splitFilePaths) {
             console.log(`Decoded: ${splitFilePaths.length} split files -> ${outputPath}`);
@@ -994,17 +995,11 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
     } catch (err) {
         console.error(`Error during decoding: ${err.message}`);
 
-        // Delete output file if authentication failed (tampered file)
+        // Delete temp file if decode failed
         try {
-            const header = headerAndDecryptStream.getHeader();
-            const finalPath = header?.extension ? outputPath + header.extension : outputPath;
-
-            if (existsSync(outputPath)) {
-                unlinkSync(outputPath);
-                console.error(`Deleted corrupted output file: ${outputPath}`);
-            } else if (header?.extension && existsSync(finalPath)) {
-                unlinkSync(finalPath);
-                console.error(`Deleted corrupted output file: ${finalPath}`);
+            if (existsSync(tempPath)) {
+                unlinkSync(tempPath);
+                console.error(`Deleted incomplete temp file: ${tempPath}`);
             }
         } catch (unlinkErr) {
             // Ignore cleanup errors

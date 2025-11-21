@@ -606,16 +606,23 @@ fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
         io::Error::new(io::ErrorKind::InvalidData, format!("Decryption failed: {}", e))
     })?;
 
-    // Write to output file
-    let output_path = output_base_path + &header.extension;
-    let output_file = File::create(&output_path)?;
-    let mut writer = BufWriter::new(output_file);
-    writer.write_all(&plaintext)?;
+    // Write to temp file first, then rename to final path
+    let temp_path = format!("{}.tmp", output_base_path);
+    let final_path = output_base_path + &header.extension;
+
+    {
+        let output_file = File::create(&temp_path)?;
+        let mut writer = BufWriter::new(output_file);
+        writer.write_all(&plaintext)?;
+    }
+
+    // Rename temp to final path
+    std::fs::rename(&temp_path, &final_path)?;
 
     if let Some(paths) = split_file_paths {
-        println!("Decoded: {} split files -> {}", paths.len(), output_path);
+        println!("Decoded: {} split files -> {}", paths.len(), final_path);
     } else {
-        println!("Decoded: {} -> {}", input_path, output_path);
+        println!("Decoded: {} -> {}", input_path, final_path);
     }
 
     Ok(())
