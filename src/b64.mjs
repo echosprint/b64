@@ -8,8 +8,8 @@
  * Features: ChaCha20-Poly1305 AEAD, PBKDF2 key derivation, tamper detection, file splitting
  *
  * Usage:
- *   Encode: node b64.mjs [-p <password>] [-s <size>] <file>
- *   Decode: node b64.mjs -d [-p <password>] <file.b64.txt>
+ *   Encode: node b64.mjs [-p] [-s <size>] <file>
+ *   Decode: node b64.mjs -d [-p] <file.b64.txt>
  *
  * Split files (e.g., file_s03p01.b64.txt) are auto-detected and combined when decoding.
  */
@@ -17,6 +17,7 @@
 import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync, readdirSync } from 'fs';
 import { parse as parsePath, dirname, basename } from 'path';
 import { Transform, Readable, PassThrough } from 'stream';
+import { createInterface } from 'readline';
 import { pipeline } from 'stream/promises';
 import { randomBytes, pbkdf2Sync, createCipheriv, createDecipheriv } from 'crypto';
 
@@ -308,11 +309,11 @@ const printUsage = (error = null) => {
         console.error(`Error: ${error}`);
     }
     console.log('Usage:');
-    console.log('  Encode: node b64.mjs [-p|--password <password>] [-s|--size <size>] <file_path>');
-    console.log('  Decode: node b64.mjs -d [-p|--password <password>] <file_path>');
+    console.log('  Encode: node b64.mjs [-p|--password] [-s|--size <size>] <file_path>');
+    console.log('  Decode: node b64.mjs -d [-p|--password] <file_path>');
     console.log('Options:');
     console.log('  -d, --decode              Decode a .b64.txt file');
-    console.log('  -p, --password <password> Custom password (or set B64_ECRY_PASSWORD env var)');
+    console.log('  -p, --password          Prompt for password (or set B64_ECRY_PASSWORD env var)');
     console.log('  -s, --size <size>         Max output file size, e.g., 5mb, 500kb (encode only)');
     console.log('Note:');
     console.log('  Split files (e.g., file_s03p01.b64.txt) are auto-detected when decoding.');
@@ -321,27 +322,23 @@ const printUsage = (error = null) => {
 
 /**
  * Parse command line arguments
- * Supports: -d/--decode flag, -p/--password option, -s/--size option, and positional file argument
- * @returns {Object} { decode: boolean, filePath: string, password: string|null, maxSize: number|null }
+ * Supports: -d/--decode flag, -p/--password (prompt), -s/--size option, and positional file argument
+ * @returns {Object} { decode: boolean, filePath: string, promptPassword: boolean, maxSize: number|null }
  */
 const parseArgs = () => {
     const args = process.argv.slice(2);
     let decode = false;
     let filePath = null;
-    let password = null;
+    let promptPassword = false;
     let maxSize = null;
 
     for (let i = 0; i < args.length; i++) {
         if (args[i] === '-d' || args[i] === '--decode') {
             decode = true;
         } else if (args[i] === '-p' || args[i] === '--password') {
-            // Get password from next argument
-            if (i + 1 < args.length) {
-                password = args[i + 1];
-                i++; // Skip next argument since we consumed it
-            } else {
-                printUsage('--password requires a value');
-            }
+            // Prompt for password interactively (do not accept inline value)
+            // If a value follows, do not consume it; treat it as next argument.
+            promptPassword = true;
         } else if (args[i] === '-s' || args[i] === '--size') {
             // Get size from next argument
             if (i + 1 < args.length) {
@@ -366,8 +363,33 @@ const parseArgs = () => {
         printUsage('File path is required');
     }
 
-    return { decode, filePath, password, maxSize };
+    return { decode, filePath, promptPassword, maxSize };
 };
+
+/**
+ * Prompt the user to enter a password without echoing input.
+ * @param {string} message
+ * @returns {Promise<string>} The entered password
+ */
+const promptHidden = (message = 'Enter password: ') => new Promise((resolve) => {
+    const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    // Mute output while typing; show asterisks to indicate input
+    // To hide completely, change to write nothing instead of '*'.
+    rl.stdoutMuted = true;
+    rl._writeToOutput = function _writeToOutput(stringToWrite) {
+        if (rl.stdoutMuted) {
+            // rl.output.write('*'); // mask with asterisks if preferred
+            // Hide completely by not writing
+            return;
+        }
+        rl.output.write(stringToWrite);
+    };
+    rl.question(message, (answer) => {
+        console.log();
+        rl.close();
+        resolve(answer);
+    });
+});
 
 /**
  * Transform stream for ChaCha20-Poly1305 encryption
@@ -1015,11 +1037,13 @@ const decodeFile = async (inputFilePath, password = DEFAULT_PASSWORD) => {
  */
 const main = async () => {
     try {
-        const { decode, filePath, password, maxSize } = parseArgs();
+        const { decode, filePath, promptPassword, maxSize } = parseArgs();
 
-        // Password priority: CLI flag > Environment variable > Default only
-        let userPassword = password;
-        if (!userPassword && process.env.B64_ECRY_PASSWORD) {
+        // Password priority: Prompt flag > Environment variable > Default only
+        let userPassword = null;
+        if (promptPassword) {
+            userPassword = await promptHidden('Enter password: ');
+        } else if (process.env.B64_ECRY_PASSWORD) {
             userPassword = process.env.B64_ECRY_PASSWORD;
         }
 

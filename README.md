@@ -6,7 +6,7 @@ A high-performance file encoder that combines ChaCha20-Poly1305 authenticated en
 
 - 🔒 **ChaCha20-Poly1305 AEAD Encryption** - Authenticated encryption with tamper detection
 - 🔑 **PBKDF2 Key Derivation** - Secure password-based key generation (100,000 iterations, SHA-256)
-- 🔐 **Custom Password Support** - CLI flag (`-p`) and environment variable (`B64_ECRY_PASSWORD`)
+- 🔐 **Custom Password Support** - Prompt-based CLI flag (`-p`) and environment variable (`B64_ECRY_PASSWORD`)
 - 📦 **File Extension Preservation** - Automatically restores original file extensions
 - 🛡️ **Tamper Detection** - Authentication tag verification ensures file integrity
 - 🔄 **Cross-Compatible** - Rust and JavaScript versions can encode/decode each other's files
@@ -110,34 +110,33 @@ Both implementations support custom passwords for encryption/decryption. Passwor
 
 ### Password Priority
 
-1. **CLI Flag** (highest priority): `-p` or `--password`
+1. **CLI Flag** (highest priority): `-p` or `--password` (prompts; no inline value)
 2. **Environment Variable**: `B64_ECRY_PASSWORD`
 3. **Default Only**: Built-in default password
 
-### Using CLI Password
+### Using CLI Password (Prompt)
 
 **Rust:**
 ```bash
-# Encode with password
-./target/release/b64 -p "mySecret" document.pdf
+# Encode (will prompt for password securely)
+./target/release/b64 -p document.pdf
 
-# Decode with password
-./target/release/b64 -d -p "mySecret" document.b64.txt
+# Decode (will prompt for password securely)
+./target/release/b64 -d -p document.b64.txt
 ```
 
 **JavaScript:**
 ```bash
-# Encode with password
-node src/b64.mjs -p "mySecret" document.pdf
+# Encode (will prompt for password securely)
+node src/b64.mjs -p document.pdf
 
-# Decode with password
-node src/b64.mjs -d -p "mySecret" document.b64.txt
+# Decode (will prompt for password securely)
+node src/b64.mjs -d -p document.b64.txt
 ```
 
-**Note:** Always use quotes around passwords containing spaces or special characters:
-```bash
-./target/release/b64 -p 'P@$$w0rd!#$%' file.txt
-```
+Notes:
+- The `-p/--password` flag now prompts for a password; inline values like `-p mySecret` are not accepted (to avoid shell history leaks).
+- For automation/non-interactive use, set the `B64_ECRY_PASSWORD` environment variable.
 
 ### Using Environment Variable
 
@@ -164,10 +163,10 @@ node src/b64.mjs file1.pdf
 node src/b64.mjs -d file1.b64.txt
 ```
 
-**CLI flag overrides environment variable:**
+**CLI prompt overrides environment variable:**
 ```bash
 export B64_ECRY_PASSWORD="envPassword"
-./target/release/b64 -p "cliPassword" file.txt  # Uses "cliPassword"
+./target/release/b64 -p file.txt  # Prompts; uses entered password
 ```
 
 ### Cross-Implementation Compatibility
@@ -176,10 +175,10 @@ Files encrypted with the same password work across both implementations:
 
 ```bash
 # Encode with Rust
-./target/release/b64 -p "shared" document.pdf
+./target/release/b64 -p document.pdf  # prompts for password
 
 # Decode with JavaScript
-node src/b64.mjs -d -p "shared" document.b64.txt
+node src/b64.mjs -d -p document.b64.txt  # prompts for password
 ```
 
 Environment variables work identically:
@@ -301,10 +300,10 @@ node src/b64.mjs file.txt
 **Custom passwords work across implementations:**
 ```bash
 # Encode with Rust using password
-./target/release/b64 -p "secret" file.txt
+./target/release/b64 -p file.txt  # prompts for password
 
 # Decode with JavaScript using same password
-node src/b64.mjs -d -p "secret" file.b64.txt
+node src/b64.mjs -d -p file.b64.txt  # prompts for password
 ```
 
 Both use the same:
@@ -360,6 +359,7 @@ chacha20poly1305 = "0.10"
 pbkdf2 = { version = "0.12", features = ["simple"] }
 sha2 = "0.10"
 rand = "0.8"
+rpassword = "7.3"
 ```
 
 **JavaScript:**
@@ -394,7 +394,11 @@ Contributions welcome! Areas of interest:
 
 ## Changelog
 
-### v0.3.0 (Current)
+### v0.3.1 (Current)
+- **Changed**: `-p/--password` now prompts for input; inline passwords removed to prevent shell history leaks (Rust and JS).
+- **Note**: Use `B64_ECRY_PASSWORD` env var for non-interactive automation.
+
+### v0.3.0
 - **Added**: File splitting with `-s`/`--size` option for encoding
 - **Added**: Auto-detection and reassembly of split files when decoding
 - **Changed**: `-s` option now errors when used with `-d` (decode mode)

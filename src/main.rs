@@ -4,8 +4,8 @@
 //! Features: ChaCha20-Poly1305 AEAD, PBKDF2 key derivation, tamper detection, file splitting
 //!
 //! Usage:
-//!   Encode: b64 [-p <password>] [-s <size>] <file>
-//!   Decode: b64 -d [-p <password>] <file.b64.txt>
+//!   Encode: b64 [-p] [-s <size>] <file>
+//!   Decode: b64 -d [-p] <file.b64.txt>
 //!
 //! Split files (e.g., file_s03p01.b64.txt) are auto-detected and combined when decoding.
 
@@ -15,6 +15,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Nonce,
 };
 use clap::Parser;
+use rpassword::prompt_password;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use sha2::Sha256;
@@ -123,10 +124,9 @@ struct Args {
     #[arg(short, long, action)]
     decode: bool,
 
-    /// Password to use for encryption/decryption (concatenated with default password).
-    /// If not provided, uses B64_ECRY_PASSWORD environment variable if set
-    #[arg(short, long)]
-    password: Option<String>,
+    /// Prompt for password (safer than inline). If not used, falls back to B64_ECRY_PASSWORD env var or default.
+    #[arg(short = 'p', long = "password", action)]
+    prompt: bool,
 
     /// Maximum size per output file (e.g., 5mb, 500kb, 1gb). If output exceeds this,
     /// splits into multiple files named filename_XXYY.b64.txt (XX=total, YY=index)
@@ -631,8 +631,12 @@ fn decode_file(input_path: &str, password: &str) -> io::Result<()> {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
-    // Password priority: CLI flag > Environment variable > Default only
-    let user_password = args.password.or_else(|| env::var("B64_ECRY_PASSWORD").ok());
+    // Password priority: Prompt flag > Environment variable > Default only
+    let user_password = if args.prompt {
+        Some(prompt_password("Enter password: ").unwrap_or_default())
+    } else {
+        env::var("B64_ECRY_PASSWORD").ok()
+    };
 
     // Concatenate user password with default password if provided
     let final_password = match user_password {
