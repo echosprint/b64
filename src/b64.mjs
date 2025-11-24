@@ -373,22 +373,22 @@ const parseArgs = () => {
  */
 const promptHidden = (message = 'Enter password: ') => new Promise((resolve) => {
     const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-    // Mute output while typing; show asterisks to indicate input
-    // To hide completely, change to write nothing instead of '*'.
-    rl.stdoutMuted = true;
-    rl._writeToOutput = function _writeToOutput(stringToWrite) {
-        if (rl.stdoutMuted) {
-            // rl.output.write('*'); // mask with asterisks if preferred
-            // Hide completely by not writing
-            return;
-        }
-        rl.output.write(stringToWrite);
-    };
+
+    const originalWrite = rl._writeToOutput;
+
     rl.question(message, (answer) => {
-        console.log();
+        rl._writeToOutput = originalWrite;
+        rl.output.write('\n');
         rl.close();
         resolve(answer);
     });
+
+    // Apply masking after the prompt has been printed by question()
+    rl._writeToOutput = function _writeToOutput(_stringToWrite) {
+        // Hide user keystrokes completely (no asterisks)
+        return; 
+        // To show asterisks instead, use: rl.output.write('*');
+    };
 });
 
 /**
