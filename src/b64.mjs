@@ -14,9 +14,9 @@
  * Split files (e.g., file_s03p01.b64.txt) are auto-detected and combined when decoding.
  */
 
-import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync, readdirSync } from 'fs';
-import { parse as parsePath, dirname, basename } from 'path';
-import { Transform, Readable, PassThrough } from 'stream';
+import { createReadStream, createWriteStream, statSync, openSync, writeSync, closeSync, unlinkSync, existsSync, renameSync } from 'fs';
+import { parse as parsePath } from 'path';
+import { Transform, Readable } from 'stream';
 import { createInterface } from 'readline';
 import { pipeline } from 'stream/promises';
 import { randomBytes, pbkdf2Sync, createCipheriv, createDecipheriv } from 'crypto';
@@ -440,56 +440,7 @@ class EncryptTransform extends Transform {
     getAuthTag = () => this.authTag;
 }
 
-/**
- * Transform stream for ChaCha20-Poly1305 decryption
- * Decrypts data in streaming mode and verifies authentication tag
- */
-class DecryptTransform extends Transform {
-    constructor(password, nonce, salt, authTag, aad, options) {
-        super(options);
-
-        // Derive key from password
-        const key = deriveKey(password, salt);
-
-        // Create decipher (ChaCha20-Poly1305 requires 12-byte nonce)
-        this.decipher = createDecipheriv(CIPHER_ALGORITHM, key, nonce.subarray(0, 12), {
-            authTagLength: 16
-        });
-
-        // Set Additional Authenticated Data (header without authTag)
-        if (aad) {
-            this.decipher.setAAD(aad, { plaintextLength: 0 });
-        }
-
-        // Set authentication tag
-        this.decipher.setAuthTag(authTag);
-    }
-
-    _transform = (chunk, _encoding, callback) => {
-        try {
-            const decrypted = this.decipher.update(chunk);
-            this.push(decrypted);
-            callback();
-        } catch (err) {
-            callback(err);
-        }
-    };
-
-    _flush = (callback) => {
-        try {
-            const final = this.decipher.final();
-            if (final.length > 0) {
-                this.push(final);
-            }
-            console.log('Authentication verification: PASSED');
-            callback();
-        } catch (err) {
-            console.error('Authentication verification: FAILED');
-            console.error('File may be corrupted or tampered with.');
-            callback(err);
-        }
-    };
-}
+// DecryptTransform removed (not used); decoding handled by HeaderAndDecryptTransform
 
 /**
  * Transform stream that prepends header before encrypted data
@@ -678,48 +629,7 @@ class SplitWriteStream extends Transform {
  *
  * This stream extracts the header metadata and passes through only the encrypted file content
  */
-class HeaderSkipTransform extends Transform {
-    headerProcessed = false;  // Whether we've extracted the header yet
-    header = null;            // Parsed header object
-    buffer = Buffer.alloc(0); // Accumulate data until we can read the full header
-
-    _transform = (chunk, _encoding, callback) => {
-        if (!this.headerProcessed) {
-            // Accumulate chunks until we have the full 96-byte header
-            this.buffer = Buffer.concat([this.buffer, chunk]);
-
-            if (this.buffer.length >= HEADER_SIZE) {
-                try {
-                    // Parse the header
-                    this.header = Header.parse(this.buffer.subarray(0, HEADER_SIZE));
-
-                    // Push the encrypted file content (after the header)
-                    const content = this.buffer.subarray(HEADER_SIZE);
-                    if (content.length > 0) {
-                        this.push(content);
-                    }
-
-                    this.headerProcessed = true;
-                    this.buffer = null; // Free memory
-                    callback();
-                    return;
-                } catch (err) {
-                    callback(err);
-                    return;
-                }
-            }
-            // Not enough data yet, wait for more chunks
-            callback();
-        } else {
-            // Header already extracted, pass through remaining encrypted data
-            this.push(chunk);
-            callback();
-        }
-    };
-
-    getExtension = () => this.header?.extension;
-    getHeader = () => this.header;
-}
+// HeaderSkipTransform removed (not used); header extraction is integrated in HeaderAndDecryptTransform
 
 /**
  * Combined transform stream for header extraction + decryption
